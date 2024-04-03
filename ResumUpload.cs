@@ -1,74 +1,57 @@
-private async Task<Uri> InitiateResumableUploadSessionAsync(string bucketName, string objectName, StorageClient storageClient)
+private async Task ReadPipeAndUploadToGcpAsync(PipeReader reader, string bucketName, string objectName)
 {
-    var insertRequest = storageClient.Service.Objects.Insert(
-        new Google.Apis.Storage.v1.Data.Object() { Name = objectName, Bucket = bucketName }, 
-        bucketName, 
-        new MemoryStream(), // Placeholder stream, the actual data stream is managed separately
-        "application/octet-stream"
-    );
-    insertRequest.PredefinedAcl = "bucketOwnerFullControl"; // Adjust the ACL as needed
-    insertRequest.UploadType = "resumable";
+    var storageClient = await StorageClient.CreateAsync();
+    var uploadUri = await InitiateResumableUploadSessionAsync(storageClient, bucketName, objectName);
 
-    var sessionUri = await insertRequest.InitiateSessionAsync();
-
-    return sessionUri;
-}
-
-
-private async Task UploadChunksResumableAsync(PipeReader reader, string bucketName, string objectName, StorageClient storageClient)
-{
-    const int chunkSize = 256 * 1024; // GCS resumable upload chunk size must be a multiple of 256 KB
-    var sessionUri = await InitiateResumableUploadSessionAsync(bucketName, objectName, storageClient);
-
+    const int chunkSize = 256 * 1024; // 256KB, GCS requires chunk sizes to be multiples of 256KB
+    HttpClient httpClient = new HttpClient();
     long totalBytesUploaded = 0;
-    var buffer = new byte[chunkSize];
-    var httpClient = new HttpClient();
 
     while (true)
     {
+        // Read from the pipe until we accumulate enough data to form a chunk
         var readResult = await reader.ReadAsync();
-        var sequence = readResult.Buffer;
-        var position = sequence.Start;
+        var buffer = readResult.Buffer;
+        var position = buffer.Start;
 
-        while (sequence.TryGet(ref position, out var memory))
+        // Check if there is enough data to form a chunk
+        if (buffer.Length < chunkSize && !readResult.IsCompleted)
         {
-            var bytesRead = memory.Length;
-            if (bytesRead == 0) break;
+            // Not enough data to form a chunk, and more data is expected
+            reader.AdvanceTo(buffer.Start, buffer.End);
+            continue;
+        }
 
-            memory.Span.CopyTo(buffer);
-            using (var content = new ByteArrayContent(buffer, 0, bytesRead))
+        // Process all full chunks available in the buffer
+        while (buffer.Length >= chunkSize || (buffer.Length > 0 && readResult.IsCompleted))
+        {
+            var chunk = buffer.Slice(position, Math.Min(chunkSize, buffer.Length));
+            
+            // Prepare and perform the HTTP PUT request for the current chunk
+            HttpRequestMessage requestMessage = new HttpRequestMessage(HttpMethod.Put, uploadUri)
             {
-                content.Headers.ContentRange = new System.Net.Http.Headers.ContentRangeHeaderValue(totalBytesUploaded, totalBytesUploaded + bytesRead - 1);
-                content.Headers.ContentLength = bytesRead;
-                var response = await httpClient.PutAsync(sessionUri, content);
+                Content = new StreamContent(new ReadOnlyMemoryStream(chunk.ToArray()))
+            };
+            requestMessage.Headers.Add("Content-Range", $"bytes {totalBytesUploaded}-{totalBytesUploaded + chunk.Length - 1}/{(readResult.IsCompleted ? totalBytesUploaded + chunk.Length : "*")}");
 
-                if (!response.IsSuccessStatusCode)
-                {
-                    throw new Exception($"Failed to upload chunk: {response.ReasonPhrase}");
-                }
+            var response = await httpClient.SendAsync(requestMessage);
+            response.EnsureSuccessStatusCode();
 
-                totalBytesUploaded += bytesRead;
+            totalBytesUploaded += chunk.Length;
+            position = buffer.GetPosition(chunk.Length, position);
+
+            if (readResult.IsCompleted && buffer.Length == chunk.Length)
+            {
+                // This was the last chunk
+                break;
             }
         }
 
-        reader.AdvanceTo(sequence.End);
+        reader.AdvanceTo(position);
 
         if (readResult.IsCompleted)
         {
             break;
-        }
-    }
-
-    // Finalize the upload if necessary by sending a final PUT request with zero bytes of data
-    // to signify the end of the upload.
-    using (var requestMessage = new HttpRequestMessage(HttpMethod.Put, sessionUri))
-    {
-        requestMessage.Headers.ContentRange = new System.Net.Http.Headers.ContentRangeHeaderValue(totalBytesUploaded, totalBytesUploaded) { IsLastBytePresent = true };
-        var finalResponse = await httpClient.SendAsync(requestMessage);
-
-        if (!finalResponse.IsSuccessStatusCode)
-        {
-            throw new Exception($"Failed to finalize upload: {finalResponse.ReasonPhrase}");
         }
     }
 
