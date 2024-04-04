@@ -1,83 +1,69 @@
-using Google.Apis.Auth.OAuth2;
-using System.Net.Http;
-using System.Net.Http.Headers;
-
-class GcpResumableUploader
+private async Task UploadFromPipeReaderAsync(PipeReader reader, string bucketName, string objectName, StorageClient storageClient)
 {
-    private readonly HttpClient _httpClient;
-    private readonly string _bucketName;
-    private readonly string _objectName;
-    private readonly string _uploadSessionUri;
+    Uri sessionUri = await InitiateResumableUploadSessionAsync(bucketName, objectName, storageClient);
+    long position = 0; // Tracks the position in the file
 
-    public GcpResumableUploader(HttpClient httpClient, string bucketName, string objectName)
+    while (true)
     {
-        _httpClient = httpClient;
-        _bucketName = bucketName;
-        _objectName = objectName;
-        _uploadSessionUri = InitializeResumableSession(bucketName, objectName).Result;
-    }
+        // Read from the PipeReader
+        ReadResult result = await reader.ReadAsync();
+        ReadOnlySequence<byte> buffer = result.Buffer;
+        var endOfStream = result.IsCompleted;
 
-    private async Task<string> InitializeResumableSession(string bucketName, string objectName)
-    {
-        var token = await GoogleCredential.GetApplicationDefault().UnderlyingCredential
-            .GetAccessTokenForRequestAsync();
-        _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
-
-        var initRequest = new HttpRequestMessage(HttpMethod.Post, $"https://www.googleapis.com/upload/storage/v1/b/{bucketName}/o?uploadType=resumable&name={Uri.EscapeDataString(objectName)}");
-        initRequest.Headers.Add("X-Upload-Content-Type", "application/octet-stream");
-
-        var response = await _httpClient.SendAsync(initRequest);
-        response.EnsureSuccessStatusCode();
-
-        return response.Headers.Location.ToString();
-    }
-
-    public async Task UploadFromPipeReaderAsync(PipeReader reader)
-    {
-        const int chunkSize = 256 * 1024; // 256KB, adjust as needed
-        long position = 0;
-
-        while (true)
+        // Process the buffer in chunks
+        while (buffer.Length > 0)
         {
-            var readResult = await reader.ReadAsync();
-            var buffer = readResult.Buffer;
-            var endOfStream = readResult.IsCompleted;
+            // Determine the size of the current chunk
+            var chunkLength = Math.Min(chunkSize, buffer.Length);
+            var chunk = buffer.Slice(0, chunkLength);
 
-            while (buffer.Length >= chunkSize || (endOfStream && buffer.Length > 0))
-            {
-                var chunk = buffer.Slice(0, Math.Min(chunkSize, buffer.Length));
-                
-                var content = new ByteArrayContent(chunk.ToArray());
-                content.Headers.ContentRange = new ContentRangeHeaderValue(position, position + chunk.Length - 1);
-                content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+            // Convert the chunk to a byte array (consider optimizing this for large buffers)
+            byte[] chunkArray = chunk.ToArray();
 
-                var uploadResponse = await _httpClient.PutAsync(_uploadSessionUri, content);
-                uploadResponse.EnsureSuccessStatusCode();
+            // Upload the chunk to GCS
+            await UploadChunkAsync(sessionUri, chunkArray, position, position + chunkLength - 1, endOfStream && buffer.Length <= chunkLength);
+            position += chunkLength;
 
-                position += chunk.Length;
-                buffer = buffer.Slice(chunk.Length);
-            }
-
-            reader.AdvanceTo(buffer.Start, buffer.End);
-
-            if (endOfStream)
-            {
-                if (buffer.Length > 0)
-                {
-                    // Upload the final chunk if it's smaller than the chunk size
-                    var content = new ByteArrayContent(buffer.ToArray());
-                    content.Headers.ContentRange = new ContentRangeHeaderValue(position, position + buffer.Length - 1);
-                    content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
-
-                    var uploadResponse = await _httpClient.PutAsync(_uploadSessionUri, content);
-                    uploadResponse.EnsureSuccessStatusCode();
-                }
-
-                break; // Exit the loop if we've reached the end of the stream
-            }
+            // Advance the buffer
+            buffer = buffer.Slice(chunkLength);
         }
 
-        // Finalize the upload by completing the reader
-        reader.Complete();
+        // Advance the reader to the next piece of data
+        reader.AdvanceTo(buffer.Start, buffer.End);
+
+        if (endOfStream)
+        {
+            break; // Exit the loop if we've reached the end of the stream
+        }
+    }
+
+    reader.Complete(); // Mark the PipeReader as complete
+}
+
+
+private async Task UploadChunkAsync(Uri sessionUri, byte[] chunkData, long rangeStart, long rangeEnd, bool isLastChunk)
+{
+    using (var httpClient = new HttpClient())
+    {
+        using (var content = new ByteArrayContent(chunkData))
+        {
+            // Set the content type to "application/octet-stream" or as appropriate for your file
+            content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+
+            // Prepare the Content-Range header
+            string contentRange = isLastChunk ? $"bytes {rangeStart}-{rangeEnd}/*" : $"bytes {rangeStart}-{rangeEnd}/{rangeEnd + 1}";
+            httpClient.DefaultRequestHeaders.Add("Content-Range", contentRange);
+
+            // Send the PUT request to the resumable session URI
+            HttpResponseMessage response = await httpClient.PutAsync(sessionUri, content);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                // Handle unsuccessful upload attempt here
+                throw new HttpRequestException($"Failed to upload chunk. Status: {response.StatusCode}");
+            }
+
+            // Optionally, handle the response to check for completion, get the uploaded object's details, etc.
+        }
     }
 }
