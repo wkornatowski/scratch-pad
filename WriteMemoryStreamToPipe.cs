@@ -7,18 +7,23 @@ public class PipeExample
 {
     public static async Task WriteMemoryStreamToPipeWriterAsync(MemoryStream memoryStream, PipeWriter pipeWriter)
     {
-        // Reset the position of the MemoryStream to ensure we read from the beginning.
         memoryStream.Position = 0;
-
-        // Allocate a buffer for reading. This size could be adjusted based on your needs.
         byte[] buffer = new byte[4096];
         int bytesRead;
 
-        // Read from MemoryStream and write to PipeWriter in a loop until we've read all data.
         while ((bytesRead = await memoryStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
         {
-            // Write the data to the PipeWriter.
-            await pipeWriter.WriteAsync(new ReadOnlyMemory<byte>(buffer, 0, bytesRead));
+            var writeBuffer = pipeWriter.GetMemory(bytesRead);
+            buffer.AsSpan(0, bytesRead).CopyTo(writeBuffer);
+            pipeWriter.Advance(bytesRead);
+
+            // Flush the data to the reader.
+            var result = await pipeWriter.FlushAsync();
+
+            if (result.IsCompleted)
+            {
+                break;
+            }
         }
 
         // Signal to the reader that we're done writing.
