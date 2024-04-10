@@ -1,4 +1,3 @@
-using Google.Cloud.Storage.V1;
 using System;
 using System.IO;
 using System.Threading.Tasks;
@@ -9,25 +8,16 @@ namespace CsvFileComparer
     {
         static async Task Main(string[] args)
         {
-            string projectId = "your-gcp-project-id";
-            string bucketName = "your-bucket-name";
-            string firstFileName = "first-large-file.csv";
-            string secondFileName = "second-large-file.csv";
+            // Paths to the local CSV files
+            string firstFilePath = "path/to/your/first-large-file.csv";
+            string secondFilePath = "path/to/your/second-large-file.csv";
 
-            var storageClient = await StorageClient.CreateAsync();
-            await CompareCsvFilesAsync(storageClient, projectId, bucketName, firstFileName, secondFileName);
+            await CompareCsvFilesAsync(firstFilePath, secondFilePath);
         }
 
-        static async Task CompareCsvFilesAsync(StorageClient storageClient, string projectId, string bucketName, string firstFileName, string secondFileName)
+        static async Task CompareCsvFilesAsync(string firstFilePath, string secondFilePath)
         {
-            var firstFilePath = Path.GetTempFileName();
-            var secondFilePath = Path.GetTempFileName();
-
-            // Download the files to local temp files
-            await storageClient.DownloadObjectAsync(bucketName, firstFileName, File.OpenWrite(firstFilePath));
-            await storageClient.DownloadObjectAsync(bucketName, secondFileName, File.OpenWrite(secondFilePath));
-
-            // Open the temp files for reading
+            // Open the files for reading
             using var firstFileReader = new StreamReader(firstFilePath);
             using var secondFileReader = new StreamReader(secondFilePath);
 
@@ -46,10 +36,6 @@ namespace CsvFileComparer
                     // You might want to break here or handle differences accordingly
                 }
             }
-
-            // Clean up temp files
-            File.Delete(firstFilePath);
-            File.Delete(secondFilePath);
         }
     }
 }
