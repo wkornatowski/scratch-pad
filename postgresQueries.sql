@@ -5,6 +5,13 @@ AND state = 'active'
 ORDER BY duration DESC;
 
 
+SELECT pid, datname, usename, application_name, state, query, 
+       now() - state_change AS idle_duration
+FROM pg_stat_activity
+WHERE state = 'idle'
+ORDER BY idle_duration DESC;
+
+
 SELECT 
     a.pid, 
     now() - a.query_start AS duration, 
