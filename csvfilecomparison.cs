@@ -12,12 +12,41 @@ namespace CsvFileComparer
             string firstFilePath = "path/to/your/first-large-file.csv";
             string secondFilePath = "path/to/your/second-large-file.csv";
 
-            await CompareCsvFilesAsync(firstFilePath, secondFilePath);
+            // First, compare the line counts
+            if (await LineCountsMatchAsync(firstFilePath, secondFilePath))
+            {
+                Console.WriteLine("Line counts match. Proceeding with line-by-line comparison...");
+                await CompareCsvFilesAsync(firstFilePath, secondFilePath);
+            }
+            else
+            {
+                Console.WriteLine("Line counts do not match. Files are different.");
+            }
+        }
+
+        static async Task<bool> LineCountsMatchAsync(string firstFilePath, string secondFilePath)
+        {
+            var firstFileLineCount = await CountLinesAsync(firstFilePath);
+            var secondFileLineCount = await CountLinesAsync(secondFilePath);
+
+            return firstFileLineCount == secondFileLineCount;
+        }
+
+        static async Task<int> CountLinesAsync(string filePath)
+        {
+            int count = 0;
+            using (var reader = new StreamReader(filePath))
+            {
+                while (await reader.ReadLineAsync() != null)
+                {
+                    count++;
+                }
+            }
+            return count;
         }
 
         static async Task CompareCsvFilesAsync(string firstFilePath, string secondFilePath)
         {
-            // Open the files for reading
             using var firstFileReader = new StreamReader(firstFilePath);
             using var secondFileReader = new StreamReader(secondFilePath);
 
@@ -27,13 +56,11 @@ namespace CsvFileComparer
                    (secondLine = await secondFileReader.ReadLineAsync()) != null)
             {
                 lineCount++;
-                // Compare the lines
                 if (firstLine != secondLine)
                 {
                     Console.WriteLine($"Difference found at line {lineCount}:");
                     Console.WriteLine($"File 1: {firstLine}");
                     Console.WriteLine($"File 2: {secondLine}");
-                    // You might want to break here or handle differences accordingly
                 }
             }
         }
